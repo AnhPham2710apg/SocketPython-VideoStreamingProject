@@ -2,18 +2,16 @@ from tkinter import *
 import tkinter.messagebox
 from PIL import Image, ImageTk
 import socket, threading, sys, traceback, os
+import time
 
 from RtpPacket import RtpPacket
 
 CACHE_FILE_NAME = "cache-"
 CACHE_FILE_EXT = ".jpg"
 
-# Header JPEG giờ là 8 byte (phải khớp với ServerWorker)
 JPEG_HEADER_SIZE = 8
 
 class Client:
-	# THÊM MỚI: Đặt chiều rộng tối đa cho khung hình video
-	# Cửa sổ sẽ co lại vừa với kích thước này
 	MAX_DISPLAY_WIDTH = 1024 
  
 	INIT = 0
@@ -44,13 +42,24 @@ class Client:
 		self.elapsed_time = 0
 		self.timer_running = False
   
-		# THÊM MỚI: Bộ đệm tái hợp
+		# Bộ đệm tái hợp (cho các mảnh của 1 frame)
 		self.reassembly_buffer = {}
-		# THÊM MỚI: Biến lưu kích thước khung hình dự kiến
 		self.expected_frame_size = 0
 		
+		# Jitter Buffer (cho các frame hoàn chỉnh)
+		self.jitterBuffer = {}
+		self.playoutCounter = 0
+		self.isPreBuffered = False
+
+		self.PRE_BUFFER_SIZE = 40
+		self.FRAME_PERIOD = 0.05
+		
+		# THÊM MỚI: Hai sự kiện điều khiển riêng biệt
+		self.rtpListenEvent = None    # Dùng để dừng luồng listenRtp (chỉ khi teardown)
+		self.playoutEvent = None      # Dùng để TẠM DỪNG luồng playFromBuffer
+		self.playoutThread = None     # Tham chiếu đến luồng playout
+		
 	def createWidgets(self):
-		"""Xây dựng giao diện GUI."""
 		# HÀNG 2: CÁC NÚT
 		self.setup = Button(self.master, width=20, padx=3, pady=3)
 		self.setup["text"] = "Setup"
@@ -73,7 +82,6 @@ class Client:
 		self.teardown.grid(row=2, column=3, padx=2, pady=2)
 		
 		# HÀNG 0: KHUNG HÌNH PHIM
-		# SỬA ĐỔI: Xóa 'height=19' để Label tự co giãn theo ảnh đã resize
 		self.label = Label(self.master)
 		self.label.grid(row=0, column=0, columnspan=4, sticky=W+E+N+S, padx=5, pady=5)
 
@@ -101,6 +109,12 @@ class Client:
 		except TclError:
 			pass 
 
+		# THAY ĐỔI: Dừng cả hai luồng
+		if self.rtpListenEvent:
+			self.rtpListenEvent.set()
+		if self.playoutEvent:
+			self.playoutEvent.set()
+
 		if os.path.exists(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT):
 			os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT)
 		
@@ -111,134 +125,198 @@ class Client:
 			self.sendRtspRequest(self.PAUSE)
    
 			self.timer_running = False
+			
+			# THAY ĐỔI: Chỉ dừng luồng playout
+			if self.playoutEvent:
+				self.playoutEvent.set() # set() = "pause"
 	
 	def playMovie(self):
 		if self.state == self.READY:
-			threading.Thread(target=self.listenRtp).start()
-			self.playEvent = threading.Event()
-			self.playEvent.clear()
+			
+			if self.playoutThread is None or not self.playoutThread.is_alive():
+				self.playoutThread = threading.Thread(target=self.playFromBuffer)
+				self.playoutThread.start()
+			
+			# Gửi yêu cầu PLAY
 			self.sendRtspRequest(self.PLAY)
-
+			
+			# Báo cho luồng playout tiếp tục (clear() = "run")
+			if self.playoutEvent:
+				self.playoutEvent.clear()
+			
 			self.timer_running = True
 			self.update_timer()
 	
 	def listenRtp(self):
-		"""SỬA ĐỔI HOÀN TOÀN: Logic tái hợp gói tin CÓ KIỂM TRA ĐỘ HOÀN CHỈNH."""
+		# print("Listen thread started (buffering in background).")
 		while True:
 			try:
+				if self.rtpListenEvent.is_set(): 
+					break
+
 				data = self.rtpSocket.recv(20480)
 				if data:
 					rtpPacket = RtpPacket()
 					rtpPacket.decode(data)
 					
 					currFrameNbr = rtpPacket.seqNum()
-					marker = rtpPacket.marker() # Lấy Marker bit
+					marker = rtpPacket.marker()
 					payload = rtpPacket.getPayload()
 
-					# Đảm bảo payload đủ lớn để chứa header 8-byte
 					if len(payload) < JPEG_HEADER_SIZE:
-						print(f"Runt packet received for frame {currFrameNbr}. Discarding.")
-						continue # Bỏ qua gói tin quá nhỏ
+						# print(f"Runt packet received for frame {currFrameNbr}. Discarding.")
+						continue 
 
-					# SỬA ĐỔI: Đọc header 8-byte
-					# Bytes 0-3: Fragment Offset
 					offset = int.from_bytes(payload[0:4], byteorder='big')
-					# Bytes 4-7: Total Frame Size
 					total_size = int.from_bytes(payload[4:8], byteorder='big')
-					
 					fragment_data = payload[JPEG_HEADER_SIZE:]
 
 					# Logic tái hợp
 					if currFrameNbr > self.frameNbr:
-						# Đây là mảnh đầu tiên của một frame mới
 						self.frameNbr = currFrameNbr
-						print("Current Seq Number:", currFrameNbr)
-						self.reassembly_buffer = {} # Xóa bộ đệm cũ
-						self.expected_frame_size = total_size # Lưu kích thước dự kiến
+						self.reassembly_buffer = {} 
+						self.expected_frame_size = total_size 
 						self.reassembly_buffer[offset] = fragment_data
 					
 					elif currFrameNbr == self.frameNbr:
-						# Đây là một mảnh của frame hiện tại
-						# Chỉ thêm nếu frame này chưa bị hỏng (expected_size > 0)
 						if self.expected_frame_size > 0:
 							self.reassembly_buffer[offset] = fragment_data
 
 					# Nếu đây là mảnh cuối cùng (M=1) và bộ đệm có dữ liệu
 					if marker == 1 and self.reassembly_buffer:
-						
-						# SỬA ĐỔI: KIỂM TRA ĐỘ HOÀN CHỈNH
 						received_size = sum(len(data) for data in self.reassembly_buffer.values())
 
 						if received_size == self.expected_frame_size:
-							# THÀNH CÔNG: Ghép các mảnh lại
 							full_frame_data = bytearray()
-							
-							# Sắp xếp các mảnh theo đúng thứ tự offset
 							sorted_offsets = sorted(self.reassembly_buffer.keys())
-							
 							for o in sorted_offsets:
 								full_frame_data.extend(self.reassembly_buffer[o])
 
-							# Cập nhật hình ảnh
-							self.updateMovie(self.writeFrame(full_frame_data))
-						else:
-							# THẤT BẠI: Hủy bỏ khung hình này
-							print(f"Discarding corrupt frame {self.frameNbr}. "
-								  f"Received {received_size} / {self.expected_frame_size} bytes.")
+							# Thêm vào Jitter Buffer
+							self.jitterBuffer[self.frameNbr] = full_frame_data
 
-						# Xóa bộ đệm cho khung hình tiếp theo
 						self.reassembly_buffer = {}
 						self.expected_frame_size = 0
 			
-			except:
-				# Xử lý khi dừng hoặc teardown
-				if self.playEvent.isSet(): 
+			except socket.timeout:
+				if self.rtpListenEvent.is_set():
 					break
-				
+				continue
+   
+			except Exception as e:
+				if not self.rtpListenEvent.is_set():
+					print(f"Error in listenRtp: {e}")
 				if self.teardownAcked == 1:
-					self.rtpSocket.shutdown(socket.SHUT_RDWR)
-					self.rtpSocket.close()
 					break
+		
+		if self.teardownAcked == 1:
+			try:
+				self.rtpSocket.shutdown(socket.SHUT_RDWR)
+				self.rtpSocket.close()
+			except:
+				pass
+		
+		# print("Listen thread stopped.")
+
+	def playFromBuffer(self):
+		while not self.rtpListenEvent.is_set(): 
+			try:
+				if self.playoutEvent.is_set():
+					time.sleep(0.05)
+					continue
+
+				# 1. Xử lý Pre-buffering (chỉ chạy lần đầu hoặc khi re-buffer)
+				if not self.isPreBuffered:
+					if len(self.jitterBuffer) >= self.PRE_BUFFER_SIZE:
+						self.isPreBuffered = True
+						
+						if self.jitterBuffer:
+							self.playoutCounter = min(self.jitterBuffer.keys())
+						else:
+							self.isPreBuffered = False
+							time.sleep(0.05)
+							continue
+					else:
+						time.sleep(0.05) 
+						continue
+
+				# 2. Logic Playout (Khi đã pre-buffer xong và không PAUSE)
+				if self.playoutCounter in self.jitterBuffer:
+					frameData = self.jitterBuffer.pop(self.playoutCounter)
 					
+					try:
+						self.updateMovie(self.writeFrame(frameData))
+					except TclError:
+						print("GUI window closed. Stopping playout thread.")
+						break 
+					
+					self.playoutCounter += 1
+					time.sleep(self.FRAME_PERIOD) 
+				
+				else:
+					# Bị mất frame hoặc jitter
+					if not self.jitterBuffer and self.isPreBuffered:
+						print("Jitter buffer empty. Re-buffering...")
+						self.isPreBuffered = False
+						time.sleep(0.05)
+					
+					elif self.jitterBuffer:
+						available_frames = sorted(self.jitterBuffer.keys())
+						next_available = -1
+						for f_num in available_frames:
+							if f_num > self.playoutCounter:
+								next_available = f_num
+								break
+						
+						if next_available != -1:
+							print(f"Skipping frame {self.playoutCounter}. Jumping to {next_available}")
+							self.playoutCounter = next_available
+						else:
+							time.sleep(0.01)
+					else:
+						time.sleep(0.01) 
+			
+			except Exception as e:
+				if not self.rtpListenEvent.is_set():
+					print(f"Error in playout thread: {e}")
+					traceback.print_exc(file=sys.stdout)
+					time.sleep(0.05)
+
 	def writeFrame(self, data):
 		cachename = CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT
-		file = open(cachename, "wb")
-		file.write(data)
-		file.close()
-		return cachename
+		try:
+			file = open(cachename, "wb")
+			file.write(data)
+			file.close()
+			return cachename
+		except:
+			print("Error writing cache file")
+			return None
 	
 	def updateMovie(self, imageFile):
-		"""SỬA ĐỔI HOÀN TOÀN: Tự động resize ảnh để vừa cửa sổ."""
+		if imageFile is None:
+			return
+   
 		try:
-			# 1. Mở ảnh gốc
 			img = Image.open(imageFile)
-			
-			# 2. Lấy kích thước gốc
 			original_width, original_height = img.size
 			
-			# 3. Tính toán kích thước mới dựa trên MAX_DISPLAY_WIDTH
 			if original_width > self.MAX_DISPLAY_WIDTH:
-				# Tính tỷ lệ co lại
 				w_percent = (self.MAX_DISPLAY_WIDTH / float(original_width))
-				# Tính chiều cao mới theo tỷ lệ
 				new_height = int((float(original_height) * float(w_percent)))
 				new_size = (self.MAX_DISPLAY_WIDTH, new_height)
 			else:
-				# Nếu ảnh đã nhỏ hơn max width, giữ nguyên
 				new_size = (original_width, original_height)
 			
-			# 4. Resize ảnh với bộ lọc chất lượng cao (LANCZOS)
 			resized_img = img.resize(new_size, Image.LANCZOS) 
-			
-			# 5. Tạo PhotoImage từ ảnh ĐÃ RESIZE
 			photo = ImageTk.PhotoImage(resized_img)
 			
-			# 6. Cập nhật label (Xóa 'height=288')
 			self.label.configure(image = photo) 
 			self.label.image = photo
 			
 		except Exception as e:
-			print(f"Error updating movie: {e}")
+			print(f"Error updating movie: {e}. Image file: {imageFile}")
+			pass
 		
 	def connectToServer(self):
 		self.rtspSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -292,10 +370,16 @@ class Client:
 					self.parseRtspReply(reply.decode("utf-8"))
 				
 				if self.requestSent == self.TEARDOWN:
+					if self.rtpListenEvent:
+						self.rtpListenEvent.set()
+					if self.playoutEvent:
+						self.playoutEvent.set()
+
 					self.rtspSocket.shutdown(socket.SHUT_RDWR)
 					self.rtspSocket.close()
 					break
 			except:
+				print("RTSP connection closed.")
 				break
 	
 	def parseRtspReply(self, data):
@@ -313,7 +397,17 @@ class Client:
 					if self.requestSent == self.SETUP:
 						self.state = self.READY
 						self.openRtpPort() 
-						# Update state SETUP
+						
+						self.rtpListenEvent = threading.Event()
+						self.rtpListenEvent.clear() # clear() = "run"
+						
+						self.playoutEvent = threading.Event()
+						self.playoutEvent.set()
+						
+						# Bắt đầu luồng nghe ngay lập tức
+						threading.Thread(target=self.listenRtp).start()
+						
+						# Cập nhật GUI
 						self.setup["state"] = "disabled"
 						self.start["state"] = "normal"
 						self.pause["state"] = "disabled"
@@ -321,7 +415,6 @@ class Client:
       
 					elif self.requestSent == self.PLAY:
 						self.state = self.PLAYING
-						# Update state PLAY
 						self.setup["state"] = "disabled"
 						self.start["state"] = "disabled"
 						self.pause["state"] = "normal"
@@ -329,8 +422,8 @@ class Client:
       
 					elif self.requestSent == self.PAUSE:
 						self.state = self.READY
-						self.playEvent.set()
-						# Update state PLAY
+						# XÓA: Không cần set event ở đây, 
+						#      nó đã được xử lý trong `pauseMovie()`
 						self.setup["state"] = "disabled"
 						self.start["state"] = "normal"
 						self.pause["state"] = "disabled"
@@ -338,13 +431,28 @@ class Client:
       
 					elif self.requestSent == self.TEARDOWN:
 						self.state = self.INIT
+						# THAY ĐỔI: Dừng cả hai luồng
+						if self.rtpListenEvent:
+							self.rtpListenEvent.set()
+						if self.playoutEvent:
+							self.playoutEvent.set()
 						self.teardownAcked = 1
 	
 	def openRtpPort(self):
 		self.rtpSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-		self.rtpSocket.settimeout(0.5)
+		# Đặt timeout
+		self.rtpSocket.settimeout(0.05) 
+  
+		try:
+			buffer_size = 2097152
+			self.rtpSocket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_size)
+			print(f"Set SO_RCVBUF to {buffer_size} bytes")
+		except Exception as e:
+			print(f"Warning: Could not set SO_RCVBUF. Using default. Error: {e}")
+  
 		try:
 			self.rtpSocket.bind(("", self.rtpPort))
+			print(f"RTP port opened at {self.rtpPort}")
 		except:
 			tkinter.messagebox.showwarning('Unable to Bind', 'Unable to bind PORT=%d' %self.rtpPort)
 
@@ -354,8 +462,8 @@ class Client:
 			self.exitClient()
 		else: 
 			self.playMovie()
+   
 	def update_timer(self):
-		"""Cập nhật bộ đếm thời gian mỗi giây."""
 		if self.timer_running:
 			self.elapsed_time += 1
 			
@@ -363,6 +471,8 @@ class Client:
 			seconds = self.elapsed_time % 60
 			time_string = f"{minutes:02}:{seconds:02}"
 			
-			self.timer_label.config(text=time_string)
-			
-			self.master.after(1000, self.update_timer)
+			try:
+				self.timer_label.config(text=time_string)
+				self.master.after(1000, self.update_timer)
+			except TclError:
+				pass

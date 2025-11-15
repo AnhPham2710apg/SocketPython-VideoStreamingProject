@@ -1,3 +1,5 @@
+# [ServerWorker.py]
+
 from random import randint
 import sys, traceback, threading, socket
 
@@ -118,6 +120,7 @@ class ServerWorker:
 		MAX_FRAGMENT_SIZE = MAX_PAYLOAD_SIZE - JPEG_HEADER_SIZE
 
 		while True:
+			# THAY ĐỔI: Đổi thời gian chờ thành 0.05s (20 FPS)
 			self.clientInfo['event'].wait(0.05) 
 			
 			# Stop sending if request is PAUSE or TEARDOWN
@@ -145,8 +148,6 @@ class ServerWorker:
 						fragment_data = data[offset : offset + chunk_size]
 
 						# Tạo JPEG header (8-byte)
-						# Bytes 0-3: Fragment Offset
-						# Bytes 4-7: Total Frame Size
 						offset_bytes = offset.to_bytes(4, byteorder='big')
 						jpeg_header = offset_bytes + total_size_bytes
 
@@ -162,7 +163,8 @@ class ServerWorker:
 						# Tạo và gửi gói RTP
 						rtp_packet = self.makeRtp(payload, frameNumber, marker)
 						self.clientInfo['rtpSocket'].sendto(rtp_packet, (address, port))
-					# KẾT THÚC LOGIC PHÂN MẢNH
+      
+					
 
 				except:
 					print("Connection Error")
@@ -179,7 +181,6 @@ class ServerWorker:
 		
 		rtpPacket = RtpPacket()
 		
-		# SỬA ĐỔI: Truyền `marker` vào hàm encode
 		rtpPacket.encode(version, padding, extension, cc, seqnum, marker, pt, ssrc, payload)
 		
 		return rtpPacket.getPacket()
