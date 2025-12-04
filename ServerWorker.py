@@ -6,6 +6,8 @@ import sys, traceback, threading, socket
 from VideoStream import VideoStream
 from RtpPacket import RtpPacket
 
+import time
+
 # ĐỊNH NGHĨA KÍCH THƯỚC PHÂN MẢNH
 MAX_PAYLOAD_SIZE = 1400  # Giữ cho gói UDP < 1500 (MTU)
 # Header JPEG: 4 byte (Offset) + 4 byte (Total Size)
@@ -115,17 +117,30 @@ class ServerWorker:
 			self.clientInfo['rtpSocket'].close()
 			
 	def sendRtp(self):
-		"""SỬA ĐỔI: Send RTP packets over UDP với logic phân mảnh."""
-		# Tính toán kích thước dữ liệu tối đa cho mỗi mảnh
+		# Cấu hình FPS mục tiêu
+		FPS = 24
+		FRAME_PERIOD = 1.0 / FPS  # ~0.041s
+		
+		# Tính toán kích thước phân mảnh
 		MAX_FRAGMENT_SIZE = MAX_PAYLOAD_SIZE - JPEG_HEADER_SIZE
 
+		# Thời điểm bắt đầu chuẩn
+		next_frame_time = time.time()
+
 		while True:
-			# THAY ĐỔI: Đổi thời gian chờ thành 0.05s (20 FPS)
-			self.clientInfo['event'].wait(0.05) 
+			# Tính toán thời gian cần ngủ
+			now = time.time()
+			time_to_sleep = next_frame_time - now
 			
-			# Stop sending if request is PAUSE or TEARDOWN
+			if time_to_sleep > 0:
+				self.clientInfo['event'].wait(time_to_sleep)
+			else:
+				# Nếu bị trễ (xử lý quá lâu), không ngủ mà chạy ngay để đuổi kịp
+				pass
+
+			# Stop sending if PAUSE or TEARDOWN
 			if self.clientInfo['event'].isSet(): 
-				break 
+				break
 				
 			data = self.clientInfo['videoStream'].nextFrame()
 			if data: 
@@ -163,11 +178,11 @@ class ServerWorker:
 						# Tạo và gửi gói RTP
 						rtp_packet = self.makeRtp(payload, frameNumber, marker)
 						self.clientInfo['rtpSocket'].sendto(rtp_packet, (address, port))
-      
-					
-
 				except:
 					print("Connection Error")
+     
+			# Cập nhật thời điểm cho frame KẾ TIẾP
+			next_frame_time += FRAME_PERIOD
 
 	def makeRtp(self, payload, frameNbr, marker): # <-- SỬA ĐỔI: Thêm `marker`
 		"""RTP-packetize the video data."""
