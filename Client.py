@@ -62,32 +62,58 @@ class Client:
 		self.playoutThread = None     
 		
 	def createWidgets(self):
-		self.setup = Button(self.master, width=20, padx=3, pady=3)
-		self.setup["text"] = "Setup"
-		self.setup["command"] = self.setupMovie
-		self.setup.grid(row=2, column=0, padx=2, pady=2)
-		
-		self.start = Button(self.master, width=20, padx=3, pady=3)
-		self.start["text"] = "Play"
-		self.start["command"] = self.playMovie
-		self.start.grid(row=2, column=1, padx=2, pady=2)
-		
-		self.pause = Button(self.master, width=20, padx=3, pady=3)
-		self.pause["text"] = "Pause"
-		self.pause["command"] = self.pauseMovie
-		self.pause.grid(row=2, column=2, padx=2, pady=2)
-		
-		self.teardown = Button(self.master, width=20, padx=3, pady=3)
-		self.teardown["text"] = "Teardown"
-		self.teardown["command"] =  self.exitClient
-		self.teardown.grid(row=2, column=3, padx=2, pady=2)
-		
-		self.label = Label(self.master)
+        # --- 1. CẤU HÌNH LAYOUT (Grid Weights) ---
+        # Điều này đảm bảo row 0 (video) giãn ra, đẩy row 1, 2 xuống đáy
+		self.master.grid_rowconfigure(0, weight=1) 
+		self.master.grid_columnconfigure(0, weight=1)
+		self.master.grid_columnconfigure(1, weight=1)
+		self.master.grid_columnconfigure(2, weight=1)
+		self.master.grid_columnconfigure(3, weight=1)	
+        # --- 2. TẠO PLACEHOLDER (Màn hình chờ) ---
+        # Kích thước mặc định cho khung video (ví dụ 640x480 hoặc tỷ lệ 16:9)
+		self.placeholder_w = 600
+		self.placeholder_h = 400
+        
+        # Tạo ảnh nền đen
+		bg_image = Image.new('RGB', (self.placeholder_w, self.placeholder_h), color='#f0f0f0')
+		self.photo = ImageTk.PhotoImage(bg_image)
+
+        # Label hiển thị video (Bắt đầu bằng placeholder đen)
+		self.label = Label(self.master, image=self.photo, bg="#f0f0f0")
+		self.label.image = self.photo # Giữ tham chiếu để không bị Garbage Collection xóa
 		self.label.grid(row=0, column=0, columnspan=4, sticky=W+E+N+S, padx=5, pady=5)
 
-		self.timer_label = Label(self.master, text="00:00", font=("Arial", 12))
-		self.timer_label.grid(row=1, column=0, columnspan=4, padx=5, pady=2)
+        # --- 3. TIMER LABEL ---
+		self.timer_label = Label(self.master, text="00:00", font=("Helvetica", 14, "bold"), fg="#333")
+		self.timer_label.grid(row=1, column=0, columnspan=4, padx=5, pady=5)
 
+        # --- 4. CÁC NÚT BẤM (BUTTONS) ---
+        # Tạo style padding chung cho đẹp
+		btn_padding_x = 10
+		btn_padding_y = 5
+		btn_width = 15
+
+		self.setup = Button(self.master, width=btn_width, padx=btn_padding_x, pady=btn_padding_y)
+		self.setup["text"] = "Setup"
+		self.setup["command"] = self.setupMovie
+		self.setup.grid(row=2, column=0, padx=2, pady=10)
+        
+		self.start = Button(self.master, width=btn_width, padx=btn_padding_x, pady=btn_padding_y)
+		self.start["text"] = "Play"
+		self.start["command"] = self.playMovie
+		self.start.grid(row=2, column=1, padx=2, pady=10)
+        
+		self.pause = Button(self.master, width=btn_width, padx=btn_padding_x, pady=btn_padding_y)
+		self.pause["text"] = "Pause"
+		self.pause["command"] = self.pauseMovie
+		self.pause.grid(row=2, column=2, padx=2, pady=10)
+        
+		self.teardown = Button(self.master, width=btn_width, padx=btn_padding_x, pady=btn_padding_y)
+		self.teardown["text"] = "Teardown"
+		self.teardown["command"] =  self.exitClient
+		self.teardown.grid(row=2, column=3, padx=2, pady=10)
+
+		# Set trạng thái ban đầu
 		self.setup["state"] = "normal"
 		self.start["state"] = "disabled"
 		self.pause["state"] = "disabled"
