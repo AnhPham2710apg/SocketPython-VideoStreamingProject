@@ -55,7 +55,7 @@ class Client:
 		# Số frame tối đa tải ngầm khi PAUSE
 		self.MAX_BUFFER_SIZE = 100 
 		
-		self.FRAME_PERIOD = 0.05
+		self.FRAME_PERIOD = 0.03333
 		
 		self.rtpListenEvent = None    
 		self.playoutEvent = None      
@@ -273,7 +273,11 @@ class Client:
 				pass
 
 	def playFromBuffer(self):
+		FPS = 30
+		self.FRAME_PERIOD = 1.0 / FPS
+  
 		while not self.rtpListenEvent.is_set(): 
+			start_time = time.time()
 			try:
 				# Nếu đang Pause, ngủ một chút để tiết kiệm CPU
 				if self.playoutEvent.is_set():
@@ -298,14 +302,28 @@ class Client:
 				# 2. Logic Playout
 				if self.playoutCounter in self.jitterBuffer:
 					frameData = self.jitterBuffer.pop(self.playoutCounter)
-					
+                
+                # Cập nhật ảnh (Decode + Resize + Display)
+                # Đây là tác vụ nặng nhất!
 					try:
 						self.updateMovie(frameData)
 					except TclError:
 						break 
 					
 					self.playoutCounter += 1
-					time.sleep(self.FRAME_PERIOD) 
+					
+					# --- TÍNH TOÁN THỜI GIAN NGỦ THÔNG MINH ---
+					# Tính thời gian đã tiêu tốn cho việc xử lý ảnh
+					process_duration = time.time() - start_time
+					
+					# Thời gian cần ngủ = Chu kỳ chuẩn - Thời gian đã mất
+					sleep_time = self.FRAME_PERIOD - process_duration
+					
+					if sleep_time > 0:
+						time.sleep(sleep_time)
+					else:
+						# Nếu xử lý quá chậm (máy lag), không ngủ, chạy tiếp ngay
+						pass
 				
 				else:
 					# Xử lý mất gói hoặc trễ

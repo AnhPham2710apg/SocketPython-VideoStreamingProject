@@ -84,7 +84,7 @@ class ServerWorker:
 			self.clientInfo['rtpSocket'].close()
 			
 	def sendRtp(self):
-		FPS = 24
+		FPS = 30
 		FRAME_PERIOD = 1.0 / FPS
 		MAX_FRAGMENT_SIZE = MAX_PAYLOAD_SIZE - JPEG_HEADER_SIZE
 
