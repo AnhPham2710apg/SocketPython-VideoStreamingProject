@@ -51,11 +51,11 @@ class Client:
 
 		# --- CẤU HÌNH BUFFER NÂNG CAO ---
 		# Số frame tải trước khi bắt đầu chạy
-		self.PRE_BUFFER_SIZE = 40
+		self.PRE_BUFFER_SIZE = 50
 		# Số frame tối đa tải ngầm khi PAUSE
 		self.MAX_BUFFER_SIZE = 100 
 		
-		self.FRAME_PERIOD = 0.03333
+		self.FRAME_PERIOD = 1.0/30
 		
 		self.rtpListenEvent = None    
 		self.playoutEvent = None      
@@ -122,6 +122,7 @@ class Client:
 	def setupMovie(self):
 		if self.state == self.INIT:
 			self.sendRtspRequest(self.SETUP)
+			self.setup["state"] = "disable"
 	
 	def exitClient(self):
 		self.sendRtspRequest(self.TEARDOWN) 	
@@ -160,7 +161,7 @@ class Client:
 			
 			# LƯU Ý: KHÔNG gửi self.sendRtspRequest(self.PAUSE) ở đây!
 			# Việc gửi lệnh này sẽ do listenRtp quyết định khi buffer đầy.
-			print("\n[Smart Cache] UI Paused. Buffering in background until full...")
+			# print("\n[Smart Cache] UI Paused. Buffering in background until full...")
 
 	def playMovie(self):
 		"""
@@ -189,12 +190,8 @@ class Client:
 		if self.state == self.READY:
 			# Trường hợp: Buffer đã đầy, listenRtp đã tự gửi PAUSE -> State là READY
 			# Cần gửi PLAY để Server bắn tiếp
-			print("[Smart Cache] Resuming from READY state. Sending RTSP PLAY.")
+			# print("[Smart Cache] Resuming from READY state. Sending RTSP PLAY.")
 			self.sendRtspRequest(self.PLAY)
-		elif self.state == self.PLAYING:
-			# Trường hợp: Buffer chưa đầy, Server vẫn đang bắn
-			# Không cần gửi lệnh gì cả, chỉ việc hiển thị tiếp thôi
-			print("[Smart Cache] Resuming instant (Server was still streaming).")
 
 	def listenRtp(self):
 		while True:
@@ -247,7 +244,7 @@ class Client:
 							# VÀ Buffer đã đạt ngưỡng tối đa -> Gửi lệnh PAUSE thật
 							if self.playoutEvent.is_set() and len(self.jitterBuffer) >= self.MAX_BUFFER_SIZE:
 								if self.state == self.PLAYING and self.requestSent != self.PAUSE:
-									print(f"[Smart Cache] Buffer full ({len(self.jitterBuffer)} frames). Sending real RTSP PAUSE now.")
+									# print(f"[Smart Cache] Buffer full ({len(self.jitterBuffer)} frames). Sending real RTSP PAUSE now.")
 									# Gửi lệnh PAUSE lên Server để tiết kiệm băng thông
 									self.sendRtspRequest(self.PAUSE)
 
@@ -275,6 +272,7 @@ class Client:
 	def playFromBuffer(self):
 		FPS = 30
 		self.FRAME_PERIOD = 1.0 / FPS
+		LOW_BUFFER_THRESHOLD = 20
   
 		while not self.rtpListenEvent.is_set(): 
 			start_time = time.time()
@@ -283,6 +281,14 @@ class Client:
 				if self.playoutEvent.is_set():
 					time.sleep(0.05)
 					continue
+
+				# --- LOGIC AUTO-RESUME ---
+                # Nếu số lượng frame còn lại thấp VÀ Server đang nghỉ (READY) thì gửi lệnh PLAY để Server bơm thêm dữ liệu
+				if len(self.jitterBuffer) < LOW_BUFFER_THRESHOLD and self.state == self.READY:
+                    # Kiểm tra thêm để tránh spam lệnh PLAY liên tục nếu đang đợi phản hồi
+					if self.requestSent != self.PLAY:
+                        # print("[Smart Cache] Buffer running low. Resuming stream...")
+						self.sendRtspRequest(self.PLAY)
 
 				# 1. Pre-buffering (chỉ chạy khi bắt đầu hoặc cạn buffer)
 				if not self.isPreBuffered:
@@ -328,7 +334,7 @@ class Client:
 				else:
 					# Xử lý mất gói hoặc trễ
 					if not self.jitterBuffer and self.isPreBuffered:
-						print("Buffering (Buffer Empty)...")
+						# print("Buffering (Buffer Empty)...")
 						self.isPreBuffered = False
 						time.sleep(0.05)
 					elif self.jitterBuffer:
